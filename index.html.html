@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>画像文字編集</title>
+
+<style>
+    * {
+        box-sizing: border-box;
+    }
+
+    body {
+        margin: 0;
+        padding: 20px;
+        background: #f5f5f5;
+        font-family: sans-serif;
+    }
+
+    .container {
+        max-width: 500px;
+        margin: auto;
+        background: white;
+        padding: 25px;
+        border-radius: 15px;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    }
+
+    h1 {
+        text-align: center;
+        margin-top: 0;
+        margin-bottom: 25px;
+    }
+
+    input[type="file"] {
+        width: 100%;
+        margin-bottom: 20px;
+        font-size: 16px;
+    }
+
+    button {
+        width: 100%;
+        padding: 15px;
+        margin-top: 10px;
+        border: none;
+        border-radius: 10px;
+        background: #333;
+        color: white;
+        font-size: 18px;
+        cursor: pointer;
+    }
+
+    button:active {
+        background: #555;
+    }
+
+    button:disabled {
+        background: #aaa;
+    }
+
+    #preview {
+        display: none;
+        width: 100%;
+        margin-top: 20px;
+        border-radius: 8px;
+    }
+
+    #status {
+        margin-top: 15px;
+        text-align: center;
+        font-size: 14px;
+    }
+
+    canvas {
+        display: none;
+    }
+</style>
+</head>
+
+<body>
+
+<div class="container">
+
+    <h1>画像文字編集</h1>
+
+    <input
+        type="file"
+        id="fileInput"
+        accept="image/*"
+    >
+
+    <button id="processButton" disabled>
+        画像を編集する
+    </button>
+
+    <img id="preview">
+
+    <button id="downloadButton" style="display:none;">
+        編集した画像を保存
+    </button>
+
+    <div id="status"></div>
+
+</div>
+
+<canvas id="canvas"></canvas>
+
+<script>
+
+const TOP_REMOVE_PERCENT = 6;
+const BOTTOM_REMOVE_PERCENT = 29;
+
+
+// ============================================================
+// 要素
+// ============================================================
+
+const fileInput = document.getElementById("fileInput");
+const processButton = document.getElementById("processButton");
+const downloadButton = document.getElementById("downloadButton");
+const preview = document.getElementById("preview");
+const status = document.getElementById("status");
+const canvas = document.getElementById("canvas");
+
+let processedBlob = null;
+
+
+// ============================================================
+// 画像選択
+// ============================================================
+
+fileInput.addEventListener("change", function() {
+
+    if (fileInput.files.length === 0) {
+        processButton.disabled = true;
+        return;
+    }
+
+    processButton.disabled = false;
+
+    status.textContent = "画像が選択されました。";
+
+});
+
+
+// ============================================================
+// RGB → HSV
+// ============================================================
+
+function rgbToHsv(r, g, b) {
+
+    r /= 255;
+    g /= 255;
+    b /= 255;
+
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+
+    let h;
+    let s;
+    const v = max;
+
+    const d = max - min;
+
+    if (max === 0) {
+        s = 0;
+    } else {
+        s = d / max;
+    }
+
+    if (d === 0) {
+        h = 0;
+    } else {
+
+        switch (max) {
+
+            case r:
+                h = ((g - b) / d) % 6;
+                break;
+
+            case g:
+                h = (b - r) / d + 2;
+                break;
+
+            case b:
+                h = (r - g) / d + 4;
+                break;
+        }
+
+        h *= 60;
+
+        if (h < 0) {
+            h += 360;
+        }
+    }
+
+    return [
+        h / 2,
+        s * 255,
+        v * 255
+    ];
+}
+
+
+// ============================================================
+// 画像編集
+// ============================================================
+
+processButton.addEventListener("click", function() {
+
+    const file = fileInput.files[0];
+
+    if (!file) {
+        return;
+    }
+
+    status.textContent = "画像を処理しています……";
+    processButton.disabled = true;
+
+    const img = new Image();
+
+    img.onload = function() {
+
+        // --------------------------------------------------------
+        // 元画像サイズ
+        // --------------------------------------------------------
+
+        const originalWidth = img.naturalWidth;
+        const originalHeight = img.naturalHeight;
+
+        const topPixels =
+            Math.floor(originalHeight * TOP_REMOVE_PERCENT / 100);
+
+        const bottomPixels =
+            Math.floor(originalHeight * BOTTOM_REMOVE_PERCENT / 100);
+
+        const newHeight =
+            originalHeight - topPixels - bottomPixels;
+
+
+        // --------------------------------------------------------
+        // Canvas
+        // --------------------------------------------------------
+
+        canvas.width = originalWidth;
+        canvas.height = newHeight;
+
+        const ctx = canvas.getContext("2d");
+
+        ctx.drawImage(
+            img,
+            0,
+            topPixels,
+            originalWidth,
+            newHeight,
+            0,
+            0,
+            originalWidth,
+            newHeight
+        );
+
+
+        // --------------------------------------------------------
+        // ピクセル取得
+        // --------------------------------------------------------
+
+        const imageData =
+            ctx.getImageData(
+                0,
+                0,
+                originalWidth,
+                newHeight
+            );
+
+        const data = imageData.data;
+
+        const width = originalWidth;
+        const height = newHeight;
+
+
+        // --------------------------------------------------------
+        // 黄色マスク
+        //
+        // OpenCV版：
+        // lower_yellow = (15, 80, 80)
+        // upper_yellow = (40, 255, 255)
+        // --------------------------------------------------------
+
+        const mask = new Uint8Array(width * height);
+
+        for (let y = 0; y < height; y++) {
+
+            for (let x = 0; x < width; x++) {
+
+                const index =
+                    (y * width + x) * 4;
+
+                const r = data[index];
+                const g = data[index + 1];
+                const b = data[index + 2];
+
+                const hsv = rgbToHsv(r, g, b);
+
+                const h = hsv[0];
+                const s = hsv[1];
+                const v = hsv[2];
+
+                if (
+                    h >= 15 &&
+                    h <= 40 &&
+                    s >= 80 &&
+                    s <= 255 &&
+                    v >= 80 &&
+                    v <= 255
+                ) {
+                    mask[y * width + x] = 1;
+                }
+            }
+        }
+
+
+        // --------------------------------------------------------
+        // 黄色部分を周囲に広げる
+        //
+        // OpenCV版：
+        // kernel = 9 x 9
+        // iterations = 4
+        //
+        // ブラウザ版では近傍を繰り返し確認
+        // --------------------------------------------------------
+
+        let expandedMask = mask;
+
+        const radius = 4;
+        const iterations = 4;
+
+        for (let iteration = 0; iteration < iterations; iteration++) {
+
+            const nextMask =
+                new Uint8Array(width * height);
+
+            for (let y = 0; y < height; y++) {
+
+                for (let x = 0; x < width; x++) {
+
+                    let found = false;
+
+                    for (
+                        let dy = -radius;
+                        dy <= radius && !found;
+                        dy++
+                    ) {
+
+                        const yy = y + dy;
+
+                        if (yy < 0 || yy >= height) {
+                            continue;
+                        }
+
+                        for (
+                            let dx = -radius;
+                            dx <= radius;
+                            dx++
+                        ) {
+
+                            const xx = x + dx;
+
+                            if (xx < 0 || xx >= width) {
+                                continue;
+                            }
+
+                            if (
+                                expandedMask[
+                                    yy * width + xx
+                                ] === 1
+                            ) {
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (found) {
+                        nextMask[y * width + x] = 1;
+                    }
+                }
+            }
+
+            expandedMask = nextMask;
+        }
+
+
+        // --------------------------------------------------------
+        // マスク部分を黒にする
+        // --------------------------------------------------------
+
+        for (let y = 0; y < height; y++) {
+
+            for (let x = 0; x < width; x++) {
+
+                if (
+                    expandedMask[y * width + x] === 1
+                ) {
+
+                    const index =
+                        (y * width + x) * 4;
+
+                    data[index] = 0;
+                    data[index + 1] = 0;
+                    data[index + 2] = 0;
+                }
+            }
+        }
+
+
+        // --------------------------------------------------------
+        // Canvasへ戻す
+        // --------------------------------------------------------
+
+        ctx.putImageData(
+            imageData,
+            0,
+            0
+        );
+
+
+        // --------------------------------------------------------
+        // PNGとして保存用データを作る
+        // --------------------------------------------------------
+
+        canvas.toBlob(function(blob) {
+
+            processedBlob = blob;
+
+            const url =
+                URL.createObjectURL(blob);
+
+            preview.src = url;
+            preview.style.display = "block";
+
+            downloadButton.style.display =
+                "block";
+
+            status.textContent =
+                "編集が完了しました。";
+
+            processButton.disabled = false;
+
+        }, "image/png");
+
+    };
+
+
+    img.onerror = function() {
+
+        status.textContent =
+            "画像を読み込めませんでした。";
+
+        processButton.disabled = false;
+
+    };
+
+
+    img.src = URL.createObjectURL(file);
+
+});
+
+
+// ============================================================
+// 保存
+// ============================================================
+
+downloadButton.addEventListener("click", function() {
+
+    if (!processedBlob) {
+        return;
+    }
+
+    const url =
+        URL.createObjectURL(processedBlob);
+
+    const a =
+        document.createElement("a");
+
+    a.href = url;
+
+    a.download = "processed_image.png";
+
+    document.body.appendChild(a);
+
+    a.click();
+
+    document.body.removeChild(a);
+
+    setTimeout(function() {
+        URL.revokeObjectURL(url);
+    }, 1000);
+
+});
+
+</script>
+
+</body>
+</html>
